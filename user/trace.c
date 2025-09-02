@@ -22,6 +22,7 @@ main(int argc, char *argv[])
   for(i = 2; i < argc && i < MAXARG; i++){
     nargv[i-2] = argv[i];
   }
+  nargv[argc-2] = 0;  // null terminate the argument list
   exec(nargv[0], nargv);
   exit(0);
 }
