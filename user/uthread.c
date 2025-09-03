@@ -10,10 +10,30 @@
 #define STACK_SIZE  8192
 #define MAX_THREAD  4
 
+/* Saved registers for user-level thread context switches. */
+struct uthread_context {
+  uint64 ra;    /* return address */
+  uint64 sp;    /* stack pointer */
+  
+  /* callee-saved registers */
+  uint64 s0;    /* saved register 0 */
+  uint64 s1;    /* saved register 1 */
+  uint64 s2;    /* saved register 2 */
+  uint64 s3;    /* saved register 3 */
+  uint64 s4;    /* saved register 4 */
+  uint64 s5;    /* saved register 5 */
+  uint64 s6;    /* saved register 6 */
+  uint64 s7;    /* saved register 7 */
+  uint64 s8;    /* saved register 8 */
+  uint64 s9;    /* saved register 9 */
+  uint64 s10;   /* saved register 10 */
+  uint64 s11;   /* saved register 11 */
+};
 
 struct thread {
   char       stack[STACK_SIZE]; /* the thread's stack */
   int        state;             /* FREE, RUNNING, RUNNABLE */
+  struct uthread_context context; /* thread context */
 };
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
@@ -58,10 +78,10 @@ thread_schedule(void)
     next_thread->state = RUNNING;
     t = current_thread;
     current_thread = next_thread;
-    /* YOUR CODE HERE
-     * Invoke thread_switch to switch from t to next_thread:
-     * thread_switch(??, ??);
-     */
+    
+    // 调用 thread_switch 进行线程切换
+    // 传递当前线程的上下文指针和下一个线程的上下文指针
+    thread_switch((uint64)&t->context, (uint64)&next_thread->context);
   } else
     next_thread = 0;
 }
@@ -75,7 +95,10 @@ thread_create(void (*func)())
     if (t->state == FREE) break;
   }
   t->state = RUNNABLE;
-  // YOUR CODE HERE
+  
+  // 设置线程的上下文信息
+  t->context.ra = (uint64)func;                    // 设置返回地址为函数指针
+  t->context.sp = (uint64)(t->stack + STACK_SIZE); // 指向栈底
 }
 
 void 

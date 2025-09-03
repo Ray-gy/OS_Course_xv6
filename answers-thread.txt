@@ -1,0 +1,43 @@
+为什么2个线程会有missing keys而1个线程没有？
+
+原因分析：
+当使用1个线程时，所有操作都是串行的，不存在竞争条件。但当使用2个线程时，多个线程可能同时访问和修改同一个哈希表bucket，导致数据竞争。
+
+导致missing keys的具体事件序列：
+
+假设两个线程Thread A和Thread B同时执行put操作，插入相同的key=100：
+
+1. Thread A执行put(100, 1)：
+   - 计算bucket索引：i = 100 % 5 = 0
+   - 检查table[0]中是否存在key=100
+   - 发现不存在key=100
+
+2. Thread B同时执行put(100, 2)：
+   - 计算bucket索引：i = 100 % 5 = 0  
+   - 检查table[0]中是否存在key=100
+   - 也发现不存在key=100（因为Thread A还没有插入）
+
+3. Thread A继续执行：
+   - 调用insert(100, 1, &table[0], table[0])
+   - 创建新entry，key=100, value=1
+   - 将新entry插入到table[0]的头部
+
+4. Thread B继续执行：
+   - 调用insert(100, 2, &table[0], table[0])
+   - 创建新entry，key=100, value=2
+   - 将新entry插入到table[0]的头部
+   - 这导致Thread A插入的entry被覆盖或丢失
+
+5. 结果：
+   - 最终table[0]中可能只有Thread B的entry
+   - Thread A插入的key=100丢失
+   - 在get操作时，如果查找的是Thread A插入的key，就会返回NULL
+   - 导致missing keys
+
+关键问题：
+- 检查key是否存在和插入新key不是原子操作
+- 两个线程可能同时认为key不存在，然后都尝试插入
+- 后插入的会覆盖先插入的，导致数据丢失
+
+解决方案：
+使用锁机制确保检查-插入操作的原子性，或者使用细粒度锁（每个bucket一个锁）来提高并发性能。
