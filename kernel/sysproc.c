@@ -58,6 +58,8 @@ sys_sleep(void)
   int n;
   uint ticks0;
 
+  backtrace();
+
   if(argint(0, &n) < 0)
     return -1;
   acquire(&tickslock);
@@ -94,4 +96,38 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_sigalarm(void)
+{
+  int ticks;
+  uint64 handler_va;
+
+  // 从用户态获取参数
+  if(argint(0, &ticks) < 0)
+    return -1;
+  if(argaddr(1, &handler_va) < 0)
+    return -1;
+
+  // 获取当前进程结构体指针
+  struct proc *p = myproc();
+  
+  // 设置警报信息
+  p->alarm_interval = ticks;
+  p->handler_va = handler_va;
+  p->passed_ticks = 0;  // 重置经过的时钟周期数
+  p->have_return = 1;   // 设置处理函数已经返回
+
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  struct proc* proc = myproc();
+  // 重新存储 trapframe，以便返回之前的中断代码。
+  *proc->trapframe = proc->saved_trapframe;
+  proc->have_return = 1; // true
+  return proc->trapframe->a0;
 }

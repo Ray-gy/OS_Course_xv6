@@ -105,4 +105,12 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  uint64 handler_va;
+  int alarm_interval;
+  int passed_ticks;
+  // 保存寄存器，以便在返回中断代码时重新存储。  
+  struct trapframe saved_trapframe;
+  // bool 值，表示警报处理程序是否返回。
+  int have_return;
 };
