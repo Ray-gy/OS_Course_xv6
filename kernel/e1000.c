@@ -103,6 +103,29 @@ e1000_transmit(struct mbuf *m)
   // a pointer so that it can be freed after sending.
   //
   
+  acquire(&e1000_lock);
+  uint32 tdt = regs[E1000_TDT];  
+  
+  if ((tx_ring[tdt].status & E1000_TXD_STAT_DD) == 0) {
+    release(&e1000_lock);
+    return -1;
+  }
+  
+  if (tx_mbufs[tdt] != 0) {
+    mbuffree(tx_mbufs[tdt]);
+  }
+  
+  tx_mbufs[tdt] = m;                                    
+  tx_ring[tdt].addr = (uint64)m->head;                  
+  tx_ring[tdt].length = m->len;                         
+  tx_ring[tdt].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;  
+  tx_ring[tdt].status = 0;                              
+  
+  
+  tdt = (tdt + 1) % TX_RING_SIZE;                       
+  __sync_synchronize();                                
+  regs[E1000_TDT] = tdt;                              
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +138,35 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  
+  static uint32 rdt = 0;
+  
+  while (1) {
+    if ((rx_ring[rdt].status & E1000_RXD_STAT_DD) == 0) {
+      break;
+    }
+    
+    struct mbuf *m = rx_mbufs[rdt];
+    mbufput(m, rx_ring[rdt].length);
+    net_rx(m);
+    
+    rx_mbufs[rdt] = mbufalloc(0);
+    if (!rx_mbufs[rdt]) {
+      panic("e1000_recv: mbufalloc failed");
+    }
+  
+    rx_ring[rdt].addr = (uint64)rx_mbufs[rdt]->head;
+    rx_ring[rdt].status = 0;
+    
+    // d. 更新rdt为下一个描述符位置
+    rdt = (rdt + 1) % RX_RING_SIZE;
+    
+    // e. 使用内存屏障确保操作可见
+    __sync_synchronize();
+    
+    // 更新硬件的RDT寄存器，告诉硬件这个描述符已处理完成
+    regs[E1000_RDT] = (rdt - 1 + RX_RING_SIZE) % RX_RING_SIZE;
+  }
 }
 
 void
