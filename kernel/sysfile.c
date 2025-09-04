@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -482,5 +483,227 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+// Check if a page is dirty (has PTE_D flag)
+static int
+is_page_dirty(pagetable_t pagetable, uint64 va)
+{
+  return uvmgetdirty(pagetable, va);
+}
+
+// Write back dirty pages to file for MAP_SHARED mappings
+static int
+writeback_dirty_pages(struct proc *p, struct vm_area *vma, uint64 addr, int len)
+{
+  if(vma->f == 0 || (vma->flags & MAP_SHARED) == 0)
+    return 0; // No file or not shared mapping
+  
+  uint64 start = PGROUNDUP(addr);
+  uint64 end = PGROUNDDOWN(addr + len);
+  
+  for(uint64 va = start; va < end; va += PGSIZE){
+    if(is_page_dirty(p->pagetable, va)){
+      // Get the physical address of the page
+      uint64 pa = walkaddr(p->pagetable, va);
+      if(pa == 0)
+        continue;
+      
+      // Calculate file offset
+      uint64 offset = va - vma->addr;
+      int file_offset = vma->offset + offset;
+      
+      // Write back to file
+      begin_op();
+      ilock(vma->f->ip);
+      int n = PGSIZE;
+      if(file_offset + n > vma->f->ip->size)
+        n = vma->f->ip->size - file_offset;
+      if(n > 0){
+        if(writei(vma->f->ip, 0, pa, file_offset, n) != n){
+          iunlock(vma->f->ip);
+          end_op();
+          return -1;
+        }
+      }
+      iunlock(vma->f->ip);
+      end_op();
+    }
+  }
+  
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int len, prot, flags, fd, offset;
+  
+  // Extract parameters
+  if(argaddr(0, &addr) < 0)
+    return -1;
+  if(argint(1, &len) < 0)
+    return -1;
+  if(argint(2, &prot) < 0)
+    return -1;
+  if(argint(3, &flags) < 0)
+    return -1;
+  if(argint(4, &fd) < 0)
+    return -1;
+  if(argint(5, &offset) < 0)
+    return -1;
+  
+  // Parameter validation
+  if(len <= 0)
+    return -1;
+  if(offset < 0)
+    return -1;
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return -1;
+  if((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
+    return -1;
+  
+  struct proc *p = myproc();
+  if(p == 0)
+    return -1;
+  
+  // Find an empty VMA slot
+  int vma_idx = -1;
+  for(int i = 0; i < NVMA; i++){
+    if(p->vma[i].addr == 0){
+      vma_idx = i;
+      break;
+    }
+  }
+  
+  if(vma_idx == -1)
+    return -1; // No free VMA slots
+  
+  // Determine mapping address
+  if(addr == 0){
+    // Find the highest mapped address
+    uint64 max_addr = MMAPMINADDR;
+    for(int i = 0; i < NVMA; i++){
+      if(p->vma[i].addr != 0){
+        uint64 end_addr = p->vma[i].addr + p->vma[i].len;
+        if(end_addr > max_addr)
+          max_addr = end_addr;
+      }
+    }
+    // Align to page boundary
+    addr = PGROUNDUP(max_addr);
+  }
+  
+  // Check if mapping would overlap with TRAPFRAME
+  if(addr + len > TRAPFRAME)
+    return -1;
+  
+  // Get the file if fd is valid
+  struct file *f = 0;
+  if(fd >= 0 && fd < NOFILE){
+    f = p->ofile[fd];
+    if(f){
+      // Check if file permissions allow the requested mapping
+      if((prot & PROT_WRITE) && (f->type == FD_INODE)){
+        if(f->readable && !f->writable && (flags & MAP_SHARED)){
+          // File is read-only, cannot map with write permission for MAP_SHARED
+          return -1;
+        }
+      }
+      filedup(f); // Increment reference count
+    }
+  }
+  
+  // Set up the VMA
+  p->vma[vma_idx].addr = addr;
+  p->vma[vma_idx].len = len;
+  p->vma[vma_idx].prot = prot;
+  p->vma[vma_idx].flags = flags;
+  p->vma[vma_idx].offset = offset;
+  p->vma[vma_idx].f = f;
+  
+  return addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int len;
+  
+  // Extract parameters
+  if(argaddr(0, &addr) < 0)
+    return -1;
+  if(argint(1, &len) < 0)
+    return -1;
+  
+  // Parameter validation
+  if(len < 0)
+    return -1;
+  if(len == 0)
+    return 0; // Success for zero length
+  
+  // Check if addr is page-aligned
+  if((addr % PGSIZE) != 0)
+    return -1;
+  
+  struct proc *p = myproc();
+  if(p == 0)
+    return -1;
+  
+  // Find the VMA containing this address
+  int vma_idx = -1;
+  for(int i = 0; i < NVMA; i++){
+    if(p->vma[i].addr != 0 && addr >= p->vma[i].addr && 
+       addr < p->vma[i].addr + p->vma[i].len){
+      vma_idx = i;
+      break;
+    }
+  }
+  
+  if(vma_idx == -1)
+    return -1; // Address not found in any VMA
+  
+  struct vm_area *vma = &p->vma[vma_idx];
+  
+  // Check if the unmapping range is valid
+  if(addr + len > vma->addr + vma->len)
+    return -1;
+  
+  // Write back dirty pages for MAP_SHARED mappings
+  if(writeback_dirty_pages(p, vma, addr, len) != 0)
+    return -1;
+  
+  // Unmap the pages
+  uint64 start = PGROUNDUP(addr);
+  uint64 end = PGROUNDDOWN(addr + len);
+  if(start < end){
+    uvmunmap_mmap(p->pagetable, start, (end - start) / PGSIZE, 1);
+  }
+  
+  // Update VMA structure
+  if(addr == vma->addr){
+    // Unmapping from the beginning
+    vma->addr += len;
+    vma->len -= len;
+    vma->offset += len;
+    
+    // If VMA is now empty, clear it
+    if(vma->len <= 0){
+      if(vma->f){
+        fileclose(vma->f);
+      }
+      memset(vma, 0, sizeof(*vma));
+    }
+  } else if(addr + len == vma->addr + vma->len){
+    // Unmapping from the end
+    vma->len -= len;
+  } else {
+    // Unmapping from the middle - this is not supported in this simple implementation
+    return -1;
+  }
+  
   return 0;
 }

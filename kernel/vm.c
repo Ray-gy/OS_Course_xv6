@@ -5,6 +5,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "fcntl.h"
 
 /*
  * the kernel's page table.
@@ -430,5 +431,51 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+
+// Check if a page is dirty
+int
+uvmgetdirty(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte == 0 || (*pte & PTE_V) == 0)
+    return 0;
+  return (*pte & PTE_D) != 0;
+}
+
+// Set dirty bit for a page
+void
+uvmsetdirtywrite(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte != 0 && (*pte & PTE_V) != 0){
+    *pte |= PTE_D;
+  }
+}
+
+// Unmap pages for mmap, allowing for unmapped pages (lazy allocation)
+void
+uvmunmap_mmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+{
+  uint64 a;
+  pte_t *pte;
+
+  if((va % PGSIZE) != 0)
+    panic("uvmunmap_mmap: not aligned");
+
+  for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
+    if((pte = walk(pagetable, a, 0)) == 0)
+      continue; // Skip if no page table entry
+    if((*pte & PTE_V) == 0)
+      continue; // Skip if page not mapped (lazy allocation)
+    if(PTE_FLAGS(*pte) == PTE_V)
+      panic("uvmunmap_mmap: not a leaf");
+    if(do_free){
+      uint64 pa = PTE2PA(*pte);
+      kfree((void*)pa);
+    }
+    *pte = 0;
   }
 }

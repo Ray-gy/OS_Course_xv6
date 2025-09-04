@@ -1,3 +1,12 @@
+struct vm_area {
+    uint64 addr;    // mmap address
+    int len;    // mmap memory length
+    int prot;   // permission
+    int flags;  // the mmap flags
+    int offset; // the file offset
+    struct file* f;     // pointer to the mapped file
+};
+
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -105,4 +114,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct vm_area vma[NVMA];    // VMA array - lab10
 };

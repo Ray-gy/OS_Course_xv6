@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -301,6 +305,17 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // Copy VMA structures
+  for(i = 0; i < NVMA; i++){
+    if(p->vma[i].addr != 0){
+      np->vma[i] = p->vma[i];
+      // Increment file reference count if there's a file
+      if(np->vma[i].f){
+        filedup(np->vma[i].f);
+      }
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -350,6 +365,57 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // Clean up all VMA mappings
+  for(int i = 0; i < NVMA; i++){
+    if(p->vma[i].addr != 0){
+      // Write back dirty pages for MAP_SHARED mappings
+      if(p->vma[i].f != 0 && (p->vma[i].flags & MAP_SHARED)){
+        uint64 start = PGROUNDUP(p->vma[i].addr);
+        uint64 end = PGROUNDDOWN(p->vma[i].addr + p->vma[i].len);
+        
+        for(uint64 va = start; va < end; va += PGSIZE){
+          if(uvmgetdirty(p->pagetable, va)){
+            // Get the physical address of the page
+            uint64 pa = walkaddr(p->pagetable, va);
+            if(pa == 0)
+              continue;
+            
+            // Calculate file offset
+            uint64 offset = va - p->vma[i].addr;
+            int file_offset = p->vma[i].offset + offset;
+            
+            // Write back to file
+            begin_op();
+            ilock(p->vma[i].f->ip);
+            int n = PGSIZE;
+            if(file_offset + n > p->vma[i].f->ip->size)
+              n = p->vma[i].f->ip->size - file_offset;
+            if(n > 0){
+              writei(p->vma[i].f->ip, 0, pa, file_offset, n);
+            }
+            iunlock(p->vma[i].f->ip);
+            end_op();
+          }
+        }
+      }
+      
+      // Unmap all pages in this VMA
+              uint64 start = PGROUNDUP(p->vma[i].addr);
+        uint64 end = PGROUNDDOWN(p->vma[i].addr + p->vma[i].len);
+        if(start < end){
+          uvmunmap_mmap(p->pagetable, start, (end - start) / PGSIZE, 1);
+        }
+      
+      // Close the file if it exists
+      if(p->vma[i].f){
+        fileclose(p->vma[i].f);
+      }
+      
+      // Clear the VMA
+      memset(&p->vma[i], 0, sizeof(p->vma[i]));
     }
   }
 
@@ -653,4 +719,81 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// Handle page fault for mmap lazy loading
+int
+handle_pagefault(uint64 va, int is_store)
+{
+  struct proc *p = myproc();
+  if(p == 0)
+    return -1;
+
+  // Check if the faulting address is within any VMA
+  for(int i = 0; i < NVMA; i++){
+    struct vm_area *vma = &p->vma[i];
+    if(vma->addr != 0 && va >= vma->addr && va < vma->addr + vma->len){
+      // Found the VMA containing this address
+      return mmap_lazy_load(p, vma, va, is_store);
+    }
+  }
+  
+  return -1; // Not a mmap page fault
+}
+
+// Lazy load a page for mmap
+int
+mmap_lazy_load(struct proc *p, struct vm_area *vma, uint64 va, int is_store)
+{
+  // Calculate the offset within the VMA
+  uint64 offset = va - vma->addr;
+  
+  // Check if the offset is within the file
+  if(offset >= vma->len)
+    return -1;
+  
+  // Allocate a physical page
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;
+  
+  memset(mem, 0, PGSIZE);
+  
+  // If this is a file mapping, read from the file
+  if(vma->f != 0){
+    int file_offset = vma->offset + offset;
+    int n = PGSIZE;
+    if(file_offset + n > vma->f->ip->size)
+      n = vma->f->ip->size - file_offset;
+    if(n > 0){
+      // Lock the inode before reading
+      ilock(vma->f->ip);
+      if(readi(vma->f->ip, 0, (uint64)mem, file_offset, n) != n){
+        iunlock(vma->f->ip);
+        kfree(mem);
+        return -1;
+      }
+      iunlock(vma->f->ip);
+    }
+  }
+  
+  // Map the page with appropriate permissions
+  int perm = PTE_U;
+  if(vma->prot & PROT_READ)
+    perm |= PTE_R;
+  if(vma->prot & PROT_WRITE)
+    perm |= PTE_W;
+  if(vma->prot & PROT_EXEC)
+    perm |= PTE_X;
+  
+  // For store page faults, set dirty bit
+  if(is_store && (vma->prot & PROT_WRITE))
+    perm |= PTE_D;
+  
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) != 0){
+    kfree(mem);
+    return -1;
+  }
+  
+  return 0;
 }
