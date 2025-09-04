@@ -238,6 +238,55 @@ bad:
   return -1;
 }
 
+// 跟随符号链接到目标文件，处理递归链接和循环检测
+// 输入: 已锁定的符号链接inode
+// 输出: 目标文件的已锁定inode，如果失败返回0
+static struct inode*
+follow_symlink(struct inode *ip)
+{
+  uint inums[NSYMLINK];  // 记录访问过的inode编号，用于循环检测
+  char target[MAXPATH];
+  struct inode *next_ip;
+  int i, target_len;
+  
+  for(i = 0; i < NSYMLINK; i++) {
+    if(ip->type != T_SYMLINK)
+      return ip;  // 到达最终目标，返回非符号链接的inode
+      
+    // 检查是否出现循环：当前inode编号已经访问过
+    for(int j = 0; j < i; j++) {
+      if(inums[j] == ip->inum) {
+        // 检测到循环，释放当前inode并返回错误
+        iunlockput(ip);
+        return 0;
+      }
+    }
+    inums[i] = ip->inum;  // 记录当前访问的inode编号
+    
+    // 读取符号链接的目标路径
+    if((target_len = readi(ip, 0, (uint64)target, 0, MAXPATH)) <= 0) {
+      iunlockput(ip);
+      return 0;
+    }
+    target[target_len] = '\0';  // 确保字符串结尾
+    
+    // 获取目标文件的inode
+    if((next_ip = namei(target)) == 0) {
+      iunlockput(ip);
+      return 0;
+    }
+    
+    // 释放当前符号链接的inode，锁定目标inode
+    iunlockput(ip);
+    ilock(next_ip);
+    ip = next_ip;
+  }
+  
+  // 超过最大跟随深度，释放inode并返回错误
+  iunlockput(ip);
+  return 0;
+}
+
 static struct inode*
 create(char *path, short type, short major, short minor)
 {
@@ -309,6 +358,27 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+    
+    // 处理符号链接
+    if(ip->type == T_SYMLINK) {
+      if(omode & O_NOFOLLOW) {
+        // O_NOFOLLOW 标志：不跟随符号链接，直接操作符号链接本身
+        // 符号链接只能以只读模式打开
+        if((omode & (O_WRONLY | O_RDWR)) != 0) {
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+      } else {
+        // 跟随符号链接到目标文件
+        if((ip = follow_symlink(ip)) == 0) {
+          end_op();
+          return -1;
+        }
+        // follow_symlink返回已锁定的目标inode
+      }
+    }
+    
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -482,5 +552,34 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  int n;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0) {
+    end_op();
+    return -1;
+  }
+
+  n = strlen(target);
+  if(writei(ip, 0, (uint64)target, 0, n) != n) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
   return 0;
 }
