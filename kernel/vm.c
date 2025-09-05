@@ -184,7 +184,6 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     acquire(&reflock);
     referencecount[PGROUNDUP((PTE2PA(*pte)))/PGSIZE]--;
     if(do_free && referencecount[PGROUNDUP((PTE2PA(*pte)))/PGSIZE] < 1){
-    // if(do_free){
       uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
     }
@@ -371,8 +370,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
-    if (*pte & PTE_COW)
-    {
+    if (*pte & PTE_COW){
       uint flags;
       char *mem;
       flags = PTE_FLAGS(*pte) | PTE_W;
